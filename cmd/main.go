@@ -67,6 +67,9 @@ import (
 	pacv1alpha1 "github.com/openshift-pipelines/pipelines-as-code/pkg/apis/pipelinesascode/v1alpha1"
 	routev1 "github.com/openshift/api/route/v1"
 	tektonapi "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
+	resolution_v1beta1 "github.com/tektoncd/pipeline/pkg/apis/resolution/v1beta1"
+	resolutionclientset "github.com/tektoncd/pipeline/pkg/client/resolution/clientset/versioned"
+	resolutioninformers "github.com/tektoncd/pipeline/pkg/client/resolution/informers/externalversions"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -125,6 +128,10 @@ func main() {
 	}
 	if err := tektonapi.AddToScheme(scheme); err != nil {
 		setupLog.Error(err, "unable to add tekton api to the scheme")
+		os.Exit(1)
+	}
+	if err := resolution_v1beta1.AddToScheme(scheme); err != nil {
+		setupLog.Error(err, "unable to add resolution api to the scheme")
 		os.Exit(1)
 	}
 	if err := pacv1alpha1.AddToScheme(scheme); err != nil {
@@ -219,17 +226,30 @@ func main() {
 
 	ensureBuildPipelineClusterRoleExist(mgr.GetClient())
 
+	// Create Tekton resolution clientset
+	resolutionClient, err := resolutionclientset.NewForConfig(restConfig)
+	if err != nil {
+		setupLog.Error(err, "unable to create resolution clientset")
+		os.Exit(1)
+	}
+
+	// Create resolution informer factory
+	resolutionInformerFactory := resolutioninformers.NewSharedInformerFactory(resolutionClient, 10*time.Minute)
+	resolutionRequestLister := resolutionInformerFactory.Resolution().V1beta1().ResolutionRequests().Lister()
+
 	webhookConfig, err := pacwebhook.LoadMappingFromFile(webhookConfigPath, os.ReadFile)
 	if err != nil {
 		setupLog.Error(err, "Failed to load webhook config file", "path", webhookConfigPath)
 		os.Exit(1)
 	}
 	if err = (&controllers.ComponentBuildReconciler{
-		Client:             mgr.GetClient(),
-		Scheme:             mgr.GetScheme(),
-		EventRecorder:      mgr.GetEventRecorderFor("ComponentOnboarding"),
-		WebhookURLLoader:   pacwebhook.NewConfigWebhookURLLoader(webhookConfig),
-		CredentialProvider: k8s.NewGitCredentialProvider(mgr.GetClient()),
+		Client:                  mgr.GetClient(),
+		Scheme:                  mgr.GetScheme(),
+		EventRecorder:           mgr.GetEventRecorderFor("ComponentOnboarding"),
+		WebhookURLLoader:        pacwebhook.NewConfigWebhookURLLoader(webhookConfig),
+		CredentialProvider:      k8s.NewGitCredentialProvider(mgr.GetClient()),
+		ResolutionClient:        resolutionClient,
+		ResolutionRequestLister: resolutionRequestLister,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ComponentOnboarding")
 		os.Exit(1)
@@ -285,6 +305,11 @@ func main() {
 		os.Exit(1)
 	}
 	buildMetrics.StartAvailabilityProbes(ctx)
+
+	// Start resolution informers
+	resolutionInformerFactory.Start(ctx.Done())
+	setupLog.Info("waiting for resolution informer caches to sync")
+	resolutionInformerFactory.WaitForCacheSync(ctx.Done())
 
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctx); err != nil {

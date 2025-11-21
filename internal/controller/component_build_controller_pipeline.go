@@ -28,7 +28,11 @@ import (
 	appstudiov1alpha1 "github.com/konflux-ci/application-api/api/v1alpha1"
 	tektonapi "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
 	tektonapi_v1beta1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1beta1"
+	resolution_v1beta1 "github.com/tektoncd/pipeline/pkg/apis/resolution/v1beta1"
+	"github.com/tektoncd/pipeline/pkg/remote"
 	oci "github.com/tektoncd/pipeline/pkg/remote/oci"
+	resolution "github.com/tektoncd/pipeline/pkg/remoteresolution/remote/resolution"
+	remoteresource "github.com/tektoncd/pipeline/pkg/remoteresolution/resource"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -48,6 +52,10 @@ import (
 type BuildPipeline struct {
 	Name             string   `json:"name,omitempty"`
 	Bundle           string   `json:"bundle,omitempty"`
+	Git              string   `json:"git,omitempty"`
+	GitURL           string   `json:"git-url,omitempty"`
+	GitRevision      string   `json:"git-revision,omitempty"`
+	GitPath          string   `json:"git-path,omitempty"`
 	AdditionalParams []string `json:"additional-params,omitempty"`
 }
 
@@ -62,25 +70,21 @@ func (r *ComponentBuildReconciler) generatePaCPipelineRunConfigs(ctx context.Con
 	log := ctrllog.FromContext(ctx)
 
 	var pipelineName string
-	var pipelineBundle string
 	var pipelineRef *tektonapi.PipelineRef
 	var additionalParams []string
 	var err error
 
 	// no need to check error because it would fail already in Reconcile
-	pipelineRef, additionalParams, _ = r.GetBuildPipelineFromComponentAnnotation(ctx, component)
-	pipelineName, pipelineBundle, err = getPipelineNameAndBundle(pipelineRef)
-	if err != nil {
-		return nil, nil, err
-	}
-	log.Info(fmt.Sprintf("Selected %s pipeline from %s bundle for %s component",
-		pipelineName, pipelineBundle, component.Name),
+	pipelineRef, additionalParams, pipelineName, _ = r.GetBuildPipelineFromComponentAnnotation(ctx, component)
+	// TODO log pipeline source
+	log.Info(fmt.Sprintf("Selected %s pipeline using %q resolver for %s component",
+		pipelineName, pipelineRef.Resolver, component.Name),
 		l.Audit, "true")
 
-	// Get pipeline from the bundle to be expanded to the PipelineRun
-	pipelineSpec, err := retrievePipelineSpec(ctx, pipelineBundle, pipelineName)
+	// Get pipeline from the resolver to be expanded to the PipelineRun
+	pipelineSpec, err := r.retrievePipelineSpec(ctx, pipelineRef, pipelineName, component)
 	if err != nil {
-		r.EventRecorder.Event(component, "Warning", "ErrorGettingPipelineFromBundle", err.Error())
+		r.EventRecorder.Event(component, "Warning", "ErrorGettingPipeline", err.Error())
 		return nil, nil, err
 	}
 
@@ -105,13 +109,46 @@ func (r *ComponentBuildReconciler) generatePaCPipelineRunConfigs(ctx context.Con
 	return pipelineRunOnPushYaml, pipelineRunOnPRYaml, nil
 }
 
-// retrievePipelineSpec retrieves pipeline definition with given name from the given bundle.
-func retrievePipelineSpec(ctx context.Context, bundleUri, pipelineName string) (*tektonapi.PipelineSpec, error) {
+// retrievePipelineSpec retrieves pipeline definition from the given PipelineRef.
+func (r *ComponentBuildReconciler) retrievePipelineSpec(ctx context.Context, pipelineRef *tektonapi.PipelineRef, pipelineName string, component *appstudiov1alpha1.Component) (*tektonapi.PipelineSpec, error) {
 	log := ctrllog.FromContext(ctx)
+
+	var resolver remote.Resolver
+	resolverType := pipelineRef.Resolver
+
+	switch resolverType {
+	case "bundles":
+		pipelineBundle, err := getPipelineBundle(pipelineRef)
+		if err != nil {
+			return nil, err
+		}
+		resolver = oci.NewResolver(pipelineBundle, authn.DefaultKeychain)
+
+	case "git":
+		resolverPayload := remoteresource.ResolverPayload{
+			ResolutionSpec: &resolution_v1beta1.ResolutionRequestSpec{
+				Params: pipelineRef.ResolverRef.Params,
+			},
+		}
+
+		requester := remoteresource.NewCRDRequester(r.ResolutionClient, r.ResolutionRequestLister)
+		owner := &tektonapi.PipelineRun{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pipeline-resolution-" + component.Name,
+				Namespace: component.Namespace,
+			},
+		}
+		resolver = resolution.NewResolver(requester, owner, "git", resolverPayload)
+
+	default:
+		return nil, boerrors.NewBuildOpError(
+			boerrors.EUnsupportedPipelineRef,
+			fmt.Errorf("unsupported Tekton resolver %q", resolverType),
+		)
+	}
 
 	var obj runtime.Object
 	var err error
-	resolver := oci.NewResolver(bundleUri, authn.DefaultKeychain)
 
 	if obj, _, err = resolver.Get(ctx, "pipeline", pipelineName); err != nil {
 		return nil, err
@@ -121,12 +158,14 @@ func retrievePipelineSpec(ctx context.Context, bundleUri, pipelineName string) (
 
 	if v1beta1Pipeline, ok := obj.(tektonapi_v1beta1.PipelineObject); ok {
 		v1beta1PipelineSpec := v1beta1Pipeline.PipelineSpec()
-		log.Info("Converting from v1beta1 to v1", "PipelineName", pipelineName, "Bundle", bundleUri)
+		// TODO log the source (bundle, git repo/path)
+		log.Info("Converting from v1beta1 to v1", "PipelineName", pipelineName, "Resolver", resolverType, "PipelineSource")
 		err := v1beta1PipelineSpec.ConvertTo(ctx, &pipelineSpec, &metav1.ObjectMeta{})
 		if err != nil {
 			return nil, boerrors.NewBuildOpError(
 				boerrors.EPipelineConversionFailed,
-				fmt.Errorf("pipeline %s from bundle %s: failed to convert from v1beta1 to v1: %w", pipelineName, bundleUri, err),
+				// TODO log the source (bundle, git repo/path)
+				fmt.Errorf("pipeline %s from source %s: failed to convert from v1beta1 to v1: %w", pipelineName, "", err),
 			)
 		}
 	} else if v1Pipeline, ok := obj.(*tektonapi.Pipeline); ok {
@@ -134,7 +173,8 @@ func retrievePipelineSpec(ctx context.Context, bundleUri, pipelineName string) (
 	} else {
 		return nil, boerrors.NewBuildOpError(
 			boerrors.EPipelineRetrievalFailed,
-			fmt.Errorf("failed to extract pipeline %s from bundle %s", pipelineName, bundleUri),
+			// TODO log the source (bundle, git repo/path)
+			fmt.Errorf("failed to extract pipeline %s from source %s", pipelineName, ""),
 		)
 	}
 
@@ -142,18 +182,18 @@ func retrievePipelineSpec(ctx context.Context, bundleUri, pipelineName string) (
 }
 
 // GetBuildPipelineFromComponentAnnotation parses pipeline annotation on component and returns build pipeline
-func (r *ComponentBuildReconciler) GetBuildPipelineFromComponentAnnotation(ctx context.Context, component *appstudiov1alpha1.Component) (*tektonapi.PipelineRef, []string, error) {
+func (r *ComponentBuildReconciler) GetBuildPipelineFromComponentAnnotation(ctx context.Context, component *appstudiov1alpha1.Component) (*tektonapi.PipelineRef, []string, string, error) {
 	buildPipeline, err := readBuildPipelineAnnotation(component)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	if buildPipeline == nil {
 		err := fmt.Errorf("missing or empty pipeline annotation: %s, will add default one to the component", component.Annotations[defaultBuildPipelineAnnotation])
-		return nil, nil, boerrors.NewBuildOpError(boerrors.EMissingPipelineAnnotation, err)
+		return nil, nil, "", boerrors.NewBuildOpError(boerrors.EMissingPipelineAnnotation, err)
 	}
-	if buildPipeline.Bundle == "" || buildPipeline.Name == "" {
-		err = fmt.Errorf("missing name or bundle in pipeline annotation: name=%s bundle=%s", buildPipeline.Name, buildPipeline.Bundle)
-		return nil, nil, boerrors.NewBuildOpError(boerrors.EWrongPipelineAnnotation, err)
+	if buildPipeline.Name == "" {
+		err = fmt.Errorf("missing name in pipeline annotation: name=%s", buildPipeline.Name)
+		return nil, nil, "", boerrors.NewBuildOpError(boerrors.EWrongPipelineAnnotation, err)
 	}
 	finalBundle := buildPipeline.Bundle
 	additionalParams := []string{}
@@ -161,43 +201,94 @@ func (r *ComponentBuildReconciler) GetBuildPipelineFromComponentAnnotation(ctx c
 	pipelinesConfigMap := &corev1.ConfigMap{}
 	if err := r.Client.Get(ctx, types.NamespacedName{Name: buildPipelineConfigMapResourceName, Namespace: BuildServiceNamespaceName}, pipelinesConfigMap); err != nil {
 		if errors.IsNotFound(err) {
-			return nil, nil, boerrors.NewBuildOpError(boerrors.EBuildPipelineConfigNotDefined, err)
+			return nil, nil, "", boerrors.NewBuildOpError(boerrors.EBuildPipelineConfigNotDefined, err)
 		}
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 
 	buildPipelineData := &pipelineConfig{}
 	if err := yaml.Unmarshal([]byte(pipelinesConfigMap.Data[buildPipelineConfigName]), buildPipelineData); err != nil {
-		return nil, nil, boerrors.NewBuildOpError(boerrors.EBuildPipelineConfigNotValid, err)
+		return nil, nil, "", boerrors.NewBuildOpError(boerrors.EBuildPipelineConfigNotValid, err)
 	}
 
-	for _, pipeline := range buildPipelineData.Pipelines {
-		if pipeline.Name == buildPipeline.Name {
-			if buildPipeline.Bundle == "latest" {
-				finalBundle = pipeline.Bundle
+	pipelineUsesBundlesResolver := buildPipeline.Name != "" && buildPipeline.Bundle != ""
+	pipelineUsesGitResolver := buildPipeline.Name != "" && (buildPipeline.Git != "" || (buildPipeline.GitURL != "" && buildPipeline.GitRevision != "" && buildPipeline.GitPath != ""))
+
+	if pipelineUsesGitResolver && pipelineUsesBundlesResolver {
+		err = fmt.Errorf("cannot specify multiple resolvers at the same time")
+		return nil, nil, "", boerrors.NewBuildOpError(boerrors.EWrongPipelineAnnotation, err)
+	}
+
+	var resolverType tektonapi.ResolverName
+	if pipelineUsesBundlesResolver {
+		resolverType = "bundles"
+	} else if pipelineUsesGitResolver {
+		resolverType = "git"
+	}
+
+	switch resolverType {
+	case "bundles":
+		for _, pipeline := range buildPipelineData.Pipelines {
+			if pipeline.Name == buildPipeline.Name {
+				if buildPipeline.Bundle != "" && buildPipeline.Bundle == "latest" {
+					finalBundle = pipeline.Bundle
+				}
+				additionalParams = pipeline.AdditionalParams
+				break
 			}
-			additionalParams = pipeline.AdditionalParams
-			break
 		}
-	}
 
-	// requested pipeline was not found in configMap
-	if finalBundle == "latest" {
-		err = fmt.Errorf("invalid pipeline name in pipeline annotation: name=%s", buildPipeline.Name)
-		return nil, nil, boerrors.NewBuildOpError(boerrors.EBuildPipelineInvalid, err)
-	}
+		// requested pipeline was not found in configMap
+		if finalBundle == "latest" {
+			err = fmt.Errorf("invalid pipeline name in pipeline annotation: name=%s", buildPipeline.Name)
+			return nil, nil, "", boerrors.NewBuildOpError(boerrors.EBuildPipelineInvalid, err)
+		}
 
-	pipelineRef := &tektonapi.PipelineRef{
-		ResolverRef: tektonapi.ResolverRef{
-			Resolver: "bundles",
-			Params: []tektonapi.Param{
-				{Name: "name", Value: *tektonapi.NewStructuredValues(buildPipeline.Name)},
-				{Name: "bundle", Value: *tektonapi.NewStructuredValues(finalBundle)},
-				{Name: "kind", Value: *tektonapi.NewStructuredValues("pipeline")},
+		pipelineRef := &tektonapi.PipelineRef{
+			ResolverRef: tektonapi.ResolverRef{
+				Resolver: resolverType,
+				Params: []tektonapi.Param{
+					{Name: "name", Value: *tektonapi.NewStructuredValues(buildPipeline.Name)},
+					{Name: "bundle", Value: *tektonapi.NewStructuredValues(finalBundle)},
+					{Name: "kind", Value: *tektonapi.NewStructuredValues("pipeline")},
+				},
 			},
-		},
+		}
+		return pipelineRef, additionalParams, buildPipeline.Name, nil
+
+	case "git":
+		foundPipelineInConfigMap := false
+		for _, pipeline := range buildPipelineData.Pipelines {
+			if pipeline.Name == buildPipeline.Name {
+				additionalParams = pipeline.AdditionalParams
+				foundPipelineInConfigMap = true
+				break
+			}
+		}
+
+		// requested pipeline was not found in configMap
+		if !foundPipelineInConfigMap {
+			err = fmt.Errorf("invalid pipeline name in pipeline annotation: name=%s", buildPipeline.Name)
+			return nil, nil, "", boerrors.NewBuildOpError(boerrors.EBuildPipelineInvalid, err)
+		}
+
+		pipelineRef := &tektonapi.PipelineRef{
+			ResolverRef: tektonapi.ResolverRef{
+				Resolver: resolverType,
+				Params: []tektonapi.Param{
+					{Name: "url", Value: *tektonapi.NewStructuredValues(buildPipeline.GitURL)},
+					{Name: "revision", Value: *tektonapi.NewStructuredValues(buildPipeline.GitRevision)},
+					{Name: "pathInRepo", Value: *tektonapi.NewStructuredValues(buildPipeline.GitPath)},
+				},
+			},
+		}
+		return pipelineRef, additionalParams, buildPipeline.Name, nil
 	}
-	return pipelineRef, additionalParams, nil
+
+	return nil, nil, "", boerrors.NewBuildOpError(
+		boerrors.EUnsupportedPipelineRef,
+		fmt.Errorf("unsupported Tekton resolver %q", resolverType),
+	)
 }
 
 func readBuildPipelineAnnotation(component *appstudiov1alpha1.Component) (*BuildPipeline, error) {
@@ -486,32 +577,29 @@ func getContainerImageRepository(image string) string {
 	return strings.Split(image, ":")[0]
 }
 
-func getPipelineNameAndBundle(pipelineRef *tektonapi.PipelineRef) (string, string, error) {
+func getPipelineBundle(pipelineRef *tektonapi.PipelineRef) (string, error) {
 	if pipelineRef.Resolver != "" && pipelineRef.Resolver != "bundles" {
-		return "", "", boerrors.NewBuildOpError(
+		return "", boerrors.NewBuildOpError(
 			boerrors.EUnsupportedPipelineRef,
 			fmt.Errorf("unsupported Tekton resolver %q", pipelineRef.Resolver),
 		)
 	}
 
-	name := pipelineRef.Name
 	var bundle string
 
 	for _, param := range pipelineRef.Params {
 		switch param.Name {
-		case "name":
-			name = param.Value.StringVal
 		case "bundle":
 			bundle = param.Value.StringVal
 		}
 	}
 
-	if name == "" || bundle == "" {
-		return "", "", boerrors.NewBuildOpError(
+	if bundle == "" {
+		return "", boerrors.NewBuildOpError(
 			boerrors.EMissingParamsForBundleResolver,
-			fmt.Errorf("missing name or bundle in pipelineRef: name=%s bundle=%s", name, bundle),
+			fmt.Errorf("missing bundle in pipelineRef: bundle=%s", bundle),
 		)
 	}
 
-	return name, bundle, nil
+	return bundle, nil
 }

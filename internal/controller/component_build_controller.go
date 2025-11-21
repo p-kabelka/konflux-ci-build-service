@@ -36,6 +36,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	appstudiov1alpha1 "github.com/konflux-ci/application-api/api/v1alpha1"
+	resolutionclientset "github.com/tektoncd/pipeline/pkg/client/resolution/clientset/versioned"
+	resolutionlisters "github.com/tektoncd/pipeline/pkg/client/resolution/listers/resolution/v1beta1"
 
 	"github.com/konflux-ci/build-service/pkg/boerrors"
 	"github.com/konflux-ci/build-service/pkg/bometrics"
@@ -99,11 +101,13 @@ type PaCBuildStatus struct {
 // provision Pipelines as Code configuration for the Component or
 // submit initial builds and dependent resources if PaC is not configured.
 type ComponentBuildReconciler struct {
-	Client             client.Client
-	Scheme             *runtime.Scheme
-	EventRecorder      record.EventRecorder
-	CredentialProvider *k8s.GitCredentialProvider
-	WebhookURLLoader   pacwebhook.WebhookURLLoader
+	Client                  client.Client
+	Scheme                  *runtime.Scheme
+	EventRecorder           record.EventRecorder
+	CredentialProvider      *k8s.GitCredentialProvider
+	WebhookURLLoader        pacwebhook.WebhookURLLoader
+	ResolutionClient        resolutionclientset.Interface
+	ResolutionRequestLister resolutionlisters.ResolutionRequestLister
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -267,7 +271,7 @@ func (r *ComponentBuildReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, nil
 	}
 
-	_, _, err = r.GetBuildPipelineFromComponentAnnotation(ctx, &component)
+	_, _, _, err = r.GetBuildPipelineFromComponentAnnotation(ctx, &component)
 	if err != nil {
 		buildStatus := readBuildStatus(&component)
 		// when reading pipeline annotation fails, we should end reconcile, unless transient error
