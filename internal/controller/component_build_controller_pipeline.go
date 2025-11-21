@@ -195,7 +195,6 @@ func (r *ComponentBuildReconciler) GetBuildPipelineFromComponentAnnotation(ctx c
 		err = fmt.Errorf("missing name in pipeline annotation: name=%s", buildPipeline.Name)
 		return nil, nil, "", boerrors.NewBuildOpError(boerrors.EWrongPipelineAnnotation, err)
 	}
-	finalBundle := buildPipeline.Bundle
 	additionalParams := []string{}
 
 	pipelinesConfigMap := &corev1.ConfigMap{}
@@ -211,8 +210,8 @@ func (r *ComponentBuildReconciler) GetBuildPipelineFromComponentAnnotation(ctx c
 		return nil, nil, "", boerrors.NewBuildOpError(boerrors.EBuildPipelineConfigNotValid, err)
 	}
 
-	pipelineUsesBundlesResolver := buildPipeline.Name != "" && buildPipeline.Bundle != ""
-	pipelineUsesGitResolver := buildPipeline.Name != "" && (buildPipeline.Git != "" || (buildPipeline.GitURL != "" && buildPipeline.GitRevision != "" && buildPipeline.GitPath != ""))
+	pipelineUsesBundlesResolver := buildPipeline.Bundle != ""
+	pipelineUsesGitResolver := buildPipeline.Git != "" || buildPipeline.GitURL != "" || buildPipeline.GitRevision != "" || buildPipeline.GitPath != ""
 
 	if pipelineUsesGitResolver && pipelineUsesBundlesResolver {
 		err = fmt.Errorf("cannot specify multiple resolvers at the same time")
@@ -228,9 +227,10 @@ func (r *ComponentBuildReconciler) GetBuildPipelineFromComponentAnnotation(ctx c
 
 	switch resolverType {
 	case "bundles":
+		finalBundle := buildPipeline.Bundle
 		for _, pipeline := range buildPipelineData.Pipelines {
 			if pipeline.Name == buildPipeline.Name {
-				if buildPipeline.Bundle != "" && buildPipeline.Bundle == "latest" {
+				if buildPipeline.Bundle == "latest" {
 					finalBundle = pipeline.Bundle
 				}
 				additionalParams = pipeline.AdditionalParams
@@ -257,9 +257,18 @@ func (r *ComponentBuildReconciler) GetBuildPipelineFromComponentAnnotation(ctx c
 		return pipelineRef, additionalParams, buildPipeline.Name, nil
 
 	case "git":
+		finalGitURL := buildPipeline.GitURL
+		finalGitRevision := buildPipeline.GitRevision
+		finalGitPath := buildPipeline.GitPath
+
 		foundPipelineInConfigMap := false
 		for _, pipeline := range buildPipelineData.Pipelines {
 			if pipeline.Name == buildPipeline.Name {
+				if buildPipeline.Git == "" || buildPipeline.Git == "latest" {
+					finalGitURL = pipeline.GitURL
+					finalGitRevision = pipeline.GitRevision
+					finalGitPath = pipeline.GitPath
+				}
 				additionalParams = pipeline.AdditionalParams
 				foundPipelineInConfigMap = true
 				break
@@ -272,13 +281,38 @@ func (r *ComponentBuildReconciler) GetBuildPipelineFromComponentAnnotation(ctx c
 			return nil, nil, "", boerrors.NewBuildOpError(boerrors.EBuildPipelineInvalid, err)
 		}
 
+		if buildPipeline.Git != "" && buildPipeline.Git != "latest" {
+			// TODO message
+			err = fmt.Errorf("invalid pipeline name in pipeline annotation: name=%s", buildPipeline.Name)
+			return nil, nil, "", boerrors.NewBuildOpError(boerrors.EWrongPipelineAnnotation, err)
+		}
+
+		// cannot combine latest and parameter override
+		if buildPipeline.Git == "latest" && (buildPipeline.GitURL != "" || buildPipeline.GitRevision != "" || buildPipeline.GitPath != "") {
+			// TODO message
+			err = fmt.Errorf("invalid pipeline name in pipeline annotation: name=%s", buildPipeline.Name)
+			return nil, nil, "", boerrors.NewBuildOpError(boerrors.EWrongPipelineAnnotation, err)
+		}
+
+		if buildPipeline.GitURL != "" {
+			finalGitURL = buildPipeline.GitURL
+		}
+
+		if buildPipeline.GitRevision != "" {
+			finalGitRevision = buildPipeline.GitRevision
+		}
+
+		if buildPipeline.GitPath != "" {
+			finalGitPath = buildPipeline.GitPath
+		}
+
 		pipelineRef := &tektonapi.PipelineRef{
 			ResolverRef: tektonapi.ResolverRef{
 				Resolver: resolverType,
 				Params: []tektonapi.Param{
-					{Name: "url", Value: *tektonapi.NewStructuredValues(buildPipeline.GitURL)},
-					{Name: "revision", Value: *tektonapi.NewStructuredValues(buildPipeline.GitRevision)},
-					{Name: "pathInRepo", Value: *tektonapi.NewStructuredValues(buildPipeline.GitPath)},
+					{Name: "url", Value: *tektonapi.NewStructuredValues(finalGitURL)},
+					{Name: "revision", Value: *tektonapi.NewStructuredValues(finalGitRevision)},
+					{Name: "pathInRepo", Value: *tektonapi.NewStructuredValues(finalGitPath)},
 				},
 			},
 		}
