@@ -52,7 +52,6 @@ import (
 type BuildPipeline struct {
 	Name             string   `json:"name,omitempty"`
 	Bundle           string   `json:"bundle,omitempty"`
-	Git              string   `json:"git,omitempty"`
 	GitURL           string   `json:"git-url,omitempty"`
 	GitRevision      string   `json:"git-revision,omitempty"`
 	GitPath          string   `json:"git-path,omitempty"`
@@ -214,7 +213,7 @@ func (r *ComponentBuildReconciler) GetBuildPipelineFromComponentAnnotation(ctx c
 	}
 
 	pipelineUsesBundlesResolver := buildPipeline.Bundle != ""
-	pipelineUsesGitResolver := buildPipeline.Git != "" || buildPipeline.GitURL != "" || buildPipeline.GitRevision != "" || buildPipeline.GitPath != ""
+	pipelineUsesGitResolver := buildPipeline.GitURL != "" && buildPipeline.GitRevision != "" && buildPipeline.GitPath != ""
 
 	if pipelineUsesGitResolver && pipelineUsesBundlesResolver {
 		err = fmt.Errorf("cannot specify multiple resolvers at the same time")
@@ -264,46 +263,26 @@ func (r *ComponentBuildReconciler) GetBuildPipelineFromComponentAnnotation(ctx c
 		finalGitRevision := buildPipeline.GitRevision
 		finalGitPath := buildPipeline.GitPath
 
-		foundPipelineInConfigMap := false
 		for _, pipeline := range buildPipelineData.Pipelines {
 			if pipeline.Name == buildPipeline.Name {
-				if buildPipeline.Git == "" || buildPipeline.Git == "latest" {
+				if buildPipeline.GitURL == "latest" {
 					finalGitURL = pipeline.GitURL
+				}
+				if buildPipeline.GitRevision == "latest" {
 					finalGitRevision = pipeline.GitRevision
+				}
+				if buildPipeline.GitPath == "latest" {
 					finalGitPath = pipeline.GitPath
 				}
 				additionalParams = pipeline.AdditionalParams
-				foundPipelineInConfigMap = true
 				break
 			}
 		}
 
 		// requested pipeline was not found in configMap
-		if !foundPipelineInConfigMap && buildPipeline.Git == "latest" {
+		if finalGitURL == "latest" || finalGitRevision == "latest" || finalGitPath == "latest" {
 			err = fmt.Errorf("invalid pipeline name in pipeline annotation: name=%s", buildPipeline.Name)
 			return nil, nil, "", boerrors.NewBuildOpError(boerrors.EBuildPipelineInvalid, err)
-		}
-
-		if buildPipeline.Git != "" && buildPipeline.Git != "latest" {
-			err = fmt.Errorf("invalid pipeline specifier in pipeline annotation: git=%s", buildPipeline.Git)
-			return nil, nil, "", boerrors.NewBuildOpError(boerrors.EWrongPipelineAnnotation, err)
-		}
-
-		if buildPipeline.Git == "latest" && (buildPipeline.GitURL != "" || buildPipeline.GitRevision != "" || buildPipeline.GitPath != "") {
-			err = fmt.Errorf("cannot combine pipeline specifier with parameter overrides")
-			return nil, nil, "", boerrors.NewBuildOpError(boerrors.EWrongPipelineAnnotation, err)
-		}
-
-		if buildPipeline.GitURL != "" {
-			finalGitURL = buildPipeline.GitURL
-		}
-
-		if buildPipeline.GitRevision != "" {
-			finalGitRevision = buildPipeline.GitRevision
-		}
-
-		if buildPipeline.GitPath != "" {
-			finalGitPath = buildPipeline.GitPath
 		}
 
 		pipelineRef := &tektonapi.PipelineRef{
