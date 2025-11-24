@@ -276,7 +276,7 @@ func (r *ComponentBuildReconciler) GetBuildPipelineFromComponentAnnotation(ctx c
 		}
 
 		// requested pipeline was not found in configMap
-		if !foundPipelineInConfigMap {
+		if !foundPipelineInConfigMap && buildPipeline.Git == "latest" {
 			err = fmt.Errorf("invalid pipeline name in pipeline annotation: name=%s", buildPipeline.Name)
 			return nil, nil, "", boerrors.NewBuildOpError(boerrors.EBuildPipelineInvalid, err)
 		}
