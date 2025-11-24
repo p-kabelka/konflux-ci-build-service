@@ -115,6 +115,7 @@ func (r *ComponentBuildReconciler) retrievePipelineSpec(ctx context.Context, pip
 
 	var resolver remote.Resolver
 	resolverType := pipelineRef.Resolver
+	var pipelineSource string
 
 	switch resolverType {
 	case "bundles":
@@ -123,6 +124,7 @@ func (r *ComponentBuildReconciler) retrievePipelineSpec(ctx context.Context, pip
 			return nil, err
 		}
 		resolver = oci.NewResolver(pipelineBundle, authn.DefaultKeychain)
+		pipelineSource = fmt.Sprintf("bundle: %s", pipelineBundle)
 
 	case "git":
 		resolverPayload := remoteresource.ResolverPayload{
@@ -139,6 +141,11 @@ func (r *ComponentBuildReconciler) retrievePipelineSpec(ctx context.Context, pip
 			},
 		}
 		resolver = resolution.NewResolver(requester, owner, "git", resolverPayload)
+		gitUrl, gitRevision, gitPathInRepo, err := getGitPipelineParameters(pipelineRef)
+		if err != nil {
+			return nil, err
+		}
+		pipelineSource = fmt.Sprintf("git: (%s, %s, %s)", gitUrl, gitRevision, gitPathInRepo)
 
 	default:
 		return nil, boerrors.NewBuildOpError(
@@ -158,14 +165,12 @@ func (r *ComponentBuildReconciler) retrievePipelineSpec(ctx context.Context, pip
 
 	if v1beta1Pipeline, ok := obj.(tektonapi_v1beta1.PipelineObject); ok {
 		v1beta1PipelineSpec := v1beta1Pipeline.PipelineSpec()
-		// TODO log the source (bundle, git repo/path)
-		log.Info("Converting from v1beta1 to v1", "PipelineName", pipelineName, "Resolver", resolverType, "PipelineSource")
+		log.Info("Converting from v1beta1 to v1", "PipelineName", pipelineName, "Resolver", resolverType, "PipelineSource", pipelineSource)
 		err := v1beta1PipelineSpec.ConvertTo(ctx, &pipelineSpec, &metav1.ObjectMeta{})
 		if err != nil {
 			return nil, boerrors.NewBuildOpError(
 				boerrors.EPipelineConversionFailed,
-				// TODO log the source (bundle, git repo/path)
-				fmt.Errorf("pipeline %s from source %s: failed to convert from v1beta1 to v1: %w", pipelineName, "", err),
+				fmt.Errorf("pipeline %s from %s: failed to convert from v1beta1 to v1: %w", pipelineName, pipelineSource, err),
 			)
 		}
 	} else if v1Pipeline, ok := obj.(*tektonapi.Pipeline); ok {
@@ -173,8 +178,7 @@ func (r *ComponentBuildReconciler) retrievePipelineSpec(ctx context.Context, pip
 	} else {
 		return nil, boerrors.NewBuildOpError(
 			boerrors.EPipelineRetrievalFailed,
-			// TODO log the source (bundle, git repo/path)
-			fmt.Errorf("failed to extract pipeline %s from source %s", pipelineName, ""),
+			fmt.Errorf("failed to extract pipeline %s from source %s", pipelineName, pipelineSource),
 		)
 	}
 
@@ -282,15 +286,12 @@ func (r *ComponentBuildReconciler) GetBuildPipelineFromComponentAnnotation(ctx c
 		}
 
 		if buildPipeline.Git != "" && buildPipeline.Git != "latest" {
-			// TODO message
-			err = fmt.Errorf("invalid pipeline name in pipeline annotation: name=%s", buildPipeline.Name)
+			err = fmt.Errorf("invalid pipeline specifier in pipeline annotation: git=%s", buildPipeline.Git)
 			return nil, nil, "", boerrors.NewBuildOpError(boerrors.EWrongPipelineAnnotation, err)
 		}
 
-		// cannot combine latest and parameter override
 		if buildPipeline.Git == "latest" && (buildPipeline.GitURL != "" || buildPipeline.GitRevision != "" || buildPipeline.GitPath != "") {
-			// TODO message
-			err = fmt.Errorf("invalid pipeline name in pipeline annotation: name=%s", buildPipeline.Name)
+			err = fmt.Errorf("cannot combine pipeline specifier with parameter overrides")
 			return nil, nil, "", boerrors.NewBuildOpError(boerrors.EWrongPipelineAnnotation, err)
 		}
 
@@ -636,4 +637,37 @@ func getPipelineBundle(pipelineRef *tektonapi.PipelineRef) (string, error) {
 	}
 
 	return bundle, nil
+}
+
+func getGitPipelineParameters(pipelineRef *tektonapi.PipelineRef) (string, string, string, error) {
+	if pipelineRef.Resolver != "" && pipelineRef.Resolver != "git" {
+		return "", "", "", boerrors.NewBuildOpError(
+			boerrors.EUnsupportedPipelineRef,
+			fmt.Errorf("unsupported Tekton resolver %q", pipelineRef.Resolver),
+		)
+	}
+
+	var gitUrl string
+	var gitRevision string
+	var gitPathInRepo string
+
+	for _, param := range pipelineRef.Params {
+		switch param.Name {
+		case "url":
+			gitUrl = param.Value.StringVal
+		case "revision":
+			gitRevision = param.Value.StringVal
+		case "pathInRepo":
+			gitPathInRepo = param.Value.StringVal
+		}
+	}
+
+	if gitUrl == "" || gitRevision == "" || gitPathInRepo == "" {
+		return "", "", "", boerrors.NewBuildOpError(
+			boerrors.EMissingParamsForGitResolver,
+			fmt.Errorf("missing git resolver param in pipelineRef: url=%s, revision=%s, pathInRepo=%s", gitUrl, gitRevision, gitPathInRepo),
+		)
+	}
+
+	return gitUrl, gitRevision, gitPathInRepo, nil
 }

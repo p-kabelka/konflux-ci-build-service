@@ -175,6 +175,8 @@ const (
 	EBuildPipelineInvalid BOErrorId = 307
 	// EMissingPipelineAnnotation 'build.appstudio.openshift.io/pipeline' component annotation is missing
 	EMissingPipelineAnnotation BOErrorId = 308
+	// EMissingParamsForGitResolver The pipelineRef selected for a component is missing parameters required for the git resolver.
+	EMissingParamsForGitResolver BOErrorId = 309
 
 	// EPipelineRetrievalFailed Failed to retrieve a Tekton Pipeline.
 	EPipelineRetrievalFailed BOErrorId = 400
