@@ -76,7 +76,6 @@ func (r *ComponentBuildReconciler) generatePaCPipelineRunConfigs(ctx context.Con
 
 	// no need to check error because it would fail already in Reconcile
 	pipelineRef, additionalParams, pipelineName, _ = r.GetBuildPipelineFromComponentAnnotation(ctx, component)
-	// TODO log pipeline source
 	log.Info(fmt.Sprintf("Selected %s pipeline using %q resolver for %s component",
 		pipelineName, pipelineRef.Resolver, component.Name),
 		l.Audit, "true")
