@@ -213,11 +213,21 @@ func (r *ComponentBuildReconciler) GetBuildPipelineFromComponentAnnotation(ctx c
 	}
 
 	pipelineUsesBundlesResolver := buildPipeline.Bundle != ""
-	pipelineUsesGitResolver := buildPipeline.GitURL != "" && buildPipeline.GitRevision != "" && buildPipeline.GitPath != ""
+	pipelineUsesGitResolver := buildPipeline.GitURL != "" || buildPipeline.GitRevision != "" || buildPipeline.GitPath != ""
 
 	if pipelineUsesGitResolver && pipelineUsesBundlesResolver {
 		err = fmt.Errorf("cannot specify multiple resolvers at the same time")
 		return nil, nil, "", boerrors.NewBuildOpError(boerrors.EWrongPipelineAnnotation, err)
+	}
+
+	// look for the pipeline by name in ConfigMap
+	var configMapPipeline *BuildPipeline
+	for i, pipeline := range buildPipelineData.Pipelines {
+		if pipeline.Name == buildPipeline.Name {
+			configMapPipeline = &buildPipelineData.Pipelines[i]
+			additionalParams = pipeline.AdditionalParams
+			break
+		}
 	}
 
 	var resolverType tektonapi.ResolverName
@@ -225,25 +235,31 @@ func (r *ComponentBuildReconciler) GetBuildPipelineFromComponentAnnotation(ctx c
 		resolverType = "bundles"
 	} else if pipelineUsesGitResolver {
 		resolverType = "git"
+	} else if configMapPipeline != nil {
+		// infer resolver from ConfigMap
+		if configMapPipeline.Bundle != "" {
+			resolverType = "bundles"
+		} else if configMapPipeline.GitURL != "" || configMapPipeline.GitRevision != "" || configMapPipeline.GitPath != "" {
+			resolverType = "git"
+		}
+	}
+
+	if resolverType == "" {
+		err = fmt.Errorf("cannot determine resolver for pipeline: name=%s", buildPipeline.Name)
+		return nil, nil, "", boerrors.NewBuildOpError(boerrors.EWrongPipelineAnnotation, err)
 	}
 
 	switch resolverType {
 	case "bundles":
 		finalBundle := buildPipeline.Bundle
-		for _, pipeline := range buildPipelineData.Pipelines {
-			if pipeline.Name == buildPipeline.Name {
-				if buildPipeline.Bundle == "latest" {
-					finalBundle = pipeline.Bundle
-				}
-				additionalParams = pipeline.AdditionalParams
-				break
-			}
-		}
 
-		// requested pipeline was not found in configMap
-		if finalBundle == "latest" {
-			err = fmt.Errorf("invalid pipeline name in pipeline annotation: name=%s", buildPipeline.Name)
-			return nil, nil, "", boerrors.NewBuildOpError(boerrors.EBuildPipelineInvalid, err)
+		if finalBundle == "" || finalBundle == "latest" {
+			// requested pipeline was not found in configMap
+			if configMapPipeline == nil || configMapPipeline.Bundle == "" {
+				err = fmt.Errorf("cannot find pipeline in config map: name=%s, bundle=%s", buildPipeline.Name, finalBundle)
+				return nil, nil, "", boerrors.NewBuildOpError(boerrors.EBuildPipelineInvalid, err)
+			}
+			finalBundle = configMapPipeline.Bundle
 		}
 
 		pipelineRef := &tektonapi.PipelineRef{
@@ -263,25 +279,22 @@ func (r *ComponentBuildReconciler) GetBuildPipelineFromComponentAnnotation(ctx c
 		finalGitRevision := buildPipeline.GitRevision
 		finalGitPath := buildPipeline.GitPath
 
-		for _, pipeline := range buildPipelineData.Pipelines {
-			if pipeline.Name == buildPipeline.Name {
-				if buildPipeline.GitURL == "latest" {
-					finalGitURL = pipeline.GitURL
-				}
-				if buildPipeline.GitRevision == "latest" {
-					finalGitRevision = pipeline.GitRevision
-				}
-				if buildPipeline.GitPath == "latest" {
-					finalGitPath = pipeline.GitPath
-				}
-				additionalParams = pipeline.AdditionalParams
-				break
+		// get the remaining parameters from configMap
+		if configMapPipeline != nil {
+			if finalGitURL == "" {
+				finalGitURL = configMapPipeline.GitURL
+			}
+			if finalGitRevision == "" {
+				finalGitRevision = configMapPipeline.GitRevision
+			}
+			if finalGitPath == "" {
+				finalGitPath = configMapPipeline.GitPath
 			}
 		}
 
 		// requested pipeline was not found in configMap
-		if finalGitURL == "latest" || finalGitRevision == "latest" || finalGitPath == "latest" {
-			err = fmt.Errorf("invalid pipeline name in pipeline annotation: name=%s", buildPipeline.Name)
+		if finalGitURL == "" || finalGitRevision == "" || finalGitPath == "" {
+			err = fmt.Errorf("incomplete git resolver parameters for pipeline: name=%s, git-url=%s, git-revision=%s, git-path=%s", buildPipeline.Name, finalGitURL, finalGitRevision, finalGitPath)
 			return nil, nil, "", boerrors.NewBuildOpError(boerrors.EBuildPipelineInvalid, err)
 		}
 
@@ -339,7 +352,7 @@ func (r *ComponentBuildReconciler) SetDefaultBuildPipelineComponentAnnotation(ct
 		return boerrors.NewBuildOpError(boerrors.EBuildPipelineConfigNotValid, err)
 	}
 
-	pipelineAnnotation := fmt.Sprintf("{\"name\":\"%s\",\"bundle\":\"%s\"}", buildPipelineData.DefaultPipelineName, "latest")
+	pipelineAnnotation := fmt.Sprintf("{\"name\":\"%s\"}", buildPipelineData.DefaultPipelineName)
 	if component.Annotations == nil {
 		component.Annotations = make(map[string]string)
 	}
