@@ -63,8 +63,14 @@ const (
 	ComponentContainerImage = "registry.io/username/image:tag"
 	SelectorDefaultName     = "default"
 
-	defaultPipelineName   = "docker-build"
-	defaultPipelineBundle = "quay.io/redhat-appstudio-tekton-catalog/pipeline-docker-build:07ec767c565b36296b4e185b01f05536848d9c12"
+	defaultPipelineName        = "docker-build"
+	defaultPipelineBundle      = "quay.io/redhat-appstudio-tekton-catalog/pipeline-docker-build:07ec767c565b36296b4e185b01f05536848d9c12"
+	nonConfigMapPipelineName   = "maven-zip-build-oci-ta"
+	nonConfigMapPipelineBundle = "quay.io/konflux-ci/tekton-catalog/pipeline-maven-zip-build-oci-ta:782e615430080b63ff60751f6ea597625e13aee3"
+	gitPipelineName            = "build-rpm-package"
+	gitPipelineURL             = "https://github.com/konflux-ci/rpmbuild-pipeline.git"
+	gitPipelineRevision        = "main"
+	gitPipelinePath            = "pipeline/build-rpm-package.yaml"
 
 	rpaMappingRepository1 = "test1.registry/publish"
 	rpaMappingRepository2 = "test2.registry/publish"
@@ -656,14 +662,18 @@ func deleteRoute(routeKey types.NamespacedName) {
 }
 
 func createDefaultBuildPipelineConfigMap(configMapKey types.NamespacedName) {
-	createBuildPipelineConfigMap(configMapKey, defaultPipelineBundle, defaultPipelineName)
+	pipelines := []BuildPipeline{
+		{Name: defaultPipelineName, Bundle: defaultPipelineBundle, AdditionalParams: []string{"additional_param1"}},
+		{Name: gitPipelineName, GitURL: gitPipelineURL, GitRevision: gitPipelineRevision, GitPath: gitPipelinePath, AdditionalParams: []string{"additional_param1"}},
+	}
+	createBuildPipelineConfigMap(configMapKey, pipelines, defaultPipelineName)
 }
 
-func createBuildPipelineConfigMap(configMapKey types.NamespacedName, pipelineBundle, pipelineName string) {
+func createBuildPipelineConfigMap(configMapKey types.NamespacedName, pipelines []BuildPipeline, defaultPipelineName string) {
 	configMapData := map[string]string{}
 	buildPipelineData := pipelineConfig{
-		DefaultPipelineName: pipelineName,
-		Pipelines:           []BuildPipeline{{Name: pipelineName, Bundle: pipelineBundle, AdditionalParams: []string{"additional_param1"}}},
+		DefaultPipelineName: defaultPipelineName,
+		Pipelines:           pipelines,
 	}
 	yamlData, _ := yaml.Marshal(&buildPipelineData)
 	configMapData[buildPipelineConfigName] = string(yamlData)

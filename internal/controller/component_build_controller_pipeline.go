@@ -29,10 +29,9 @@ import (
 	tektonapi "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
 	tektonapi_v1beta1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1beta1"
 	resolution_v1beta1 "github.com/tektoncd/pipeline/pkg/apis/resolution/v1beta1"
-	"github.com/tektoncd/pipeline/pkg/remote"
+	"github.com/tektoncd/pipeline/pkg/client/clientset/versioned/scheme"
 	oci "github.com/tektoncd/pipeline/pkg/remote/oci"
-	resolution "github.com/tektoncd/pipeline/pkg/remoteresolution/remote/resolution"
-	remoteresource "github.com/tektoncd/pipeline/pkg/remoteresolution/resource"
+	tektonresolvergit "github.com/tektoncd/pipeline/pkg/remoteresolution/resolver/git"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -80,7 +79,7 @@ func (r *ComponentBuildReconciler) generatePaCPipelineRunConfigs(ctx context.Con
 		l.Audit, "true")
 
 	// Get pipeline from the resolver to be expanded to the PipelineRun
-	pipelineSpec, err := r.retrievePipelineSpec(ctx, pipelineRef, pipelineName, component)
+	pipelineSpec, err := r.retrievePipelineSpec(ctx, pipelineRef, pipelineName)
 	if err != nil {
 		r.EventRecorder.Event(component, "Warning", "ErrorGettingPipeline", err.Error())
 		return nil, nil, err
@@ -108,10 +107,11 @@ func (r *ComponentBuildReconciler) generatePaCPipelineRunConfigs(ctx context.Con
 }
 
 // retrievePipelineSpec retrieves pipeline definition from the given PipelineRef.
-func (r *ComponentBuildReconciler) retrievePipelineSpec(ctx context.Context, pipelineRef *tektonapi.PipelineRef, pipelineName string, component *appstudiov1alpha1.Component) (*tektonapi.PipelineSpec, error) {
+func (r *ComponentBuildReconciler) retrievePipelineSpec(ctx context.Context, pipelineRef *tektonapi.PipelineRef, pipelineName string) (*tektonapi.PipelineSpec, error) {
 	log := ctrllog.FromContext(ctx)
 
-	var resolver remote.Resolver
+	var obj runtime.Object
+
 	resolverType := pipelineRef.Resolver
 	var pipelineSource string
 
@@ -121,42 +121,47 @@ func (r *ComponentBuildReconciler) retrievePipelineSpec(ctx context.Context, pip
 		if err != nil {
 			return nil, err
 		}
-		resolver = oci.NewResolver(pipelineBundle, authn.DefaultKeychain)
 		pipelineSource = fmt.Sprintf("bundle: %s", pipelineBundle)
 
-	case "git":
-		resolverPayload := remoteresource.ResolverPayload{
-			ResolutionSpec: &resolution_v1beta1.ResolutionRequestSpec{
-				Params: pipelineRef.ResolverRef.Params,
-			},
+		resolver := oci.NewResolver(pipelineBundle, authn.DefaultKeychain)
+
+		if obj, _, err = resolver.Get(ctx, "pipeline", pipelineName); err != nil {
+			return nil, err
 		}
 
-		requester := remoteresource.NewCRDRequester(r.ResolutionClient, r.ResolutionRequestLister)
-		owner := &tektonapi.PipelineRun{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "pipeline-resolution-" + component.Name,
-				Namespace: component.Namespace,
-			},
-		}
-		resolver = resolution.NewResolver(requester, owner, "git", resolverPayload)
+	case "git":
 		gitUrl, gitRevision, gitPathInRepo, err := getGitPipelineParameters(pipelineRef)
 		if err != nil {
 			return nil, err
 		}
 		pipelineSource = fmt.Sprintf("git: (%s, %s, %s)", gitUrl, gitRevision, gitPathInRepo)
 
+		gitResolverParams := make(map[string]string, len(pipelineRef.Params))
+		for _, param := range pipelineRef.Params {
+			gitResolverParams[param.Name] = param.Value.StringVal
+		}
+		resolver := &tektonresolvergit.Resolver{}
+
+		requestSpec := &resolution_v1beta1.ResolutionRequestSpec{
+			Params: pipelineRef.ResolverRef.Params,
+		}
+		resolved, err := resolver.Resolve(ctx, requestSpec)
+		if err != nil {
+			return nil, boerrors.NewBuildOpError(
+				boerrors.EPipelineRetrievalFailed,
+				fmt.Errorf("failed to fetch pipeline %s from source %s", pipelineName, pipelineSource),
+			)
+		}
+
+		if obj, _, err = scheme.Codecs.UniversalDeserializer().Decode(resolved.Data(), nil, nil); err != nil {
+			return nil, err
+		}
+
 	default:
 		return nil, boerrors.NewBuildOpError(
 			boerrors.EUnsupportedPipelineRef,
 			fmt.Errorf("unsupported Tekton resolver %q", resolverType),
 		)
-	}
-
-	var obj runtime.Object
-	var err error
-
-	if obj, _, err = resolver.Get(ctx, "pipeline", pipelineName); err != nil {
-		return nil, err
 	}
 
 	var pipelineSpec tektonapi.PipelineSpec
