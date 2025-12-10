@@ -883,6 +883,108 @@ var _ = Describe("Component build controller", func() {
 			expectPacBuildStatus(resourcePacPrepKey, "enabled", 0, "", mergeUrl)
 		})
 
+		It("should successfully submit PR with PaC definitions using GitHub application, using explicit git resolver not in configMap", func() {
+			mergeUrl := "merge-url"
+
+			isCreatePaCPullRequestInvoked := false
+			EnsurePaCMergeRequestFunc = func(repoUrl string, d *gp.MergeRequestData) (string, error) {
+				isCreatePaCPullRequestInvoked = true
+				Expect(repoUrl).To(Equal(SampleRepoLink + "-" + resourcePacPrepKey.Name))
+				Expect(len(d.Files)).To(Equal(2))
+				for _, file := range d.Files {
+					Expect(strings.HasPrefix(file.FullPath, ".tekton/")).To(BeTrue())
+				}
+				Expect(d.CommitMessage).ToNot(BeEmpty())
+				Expect(d.BranchName).ToNot(BeEmpty())
+				Expect(d.BaseBranchName).To(Equal("main"))
+				Expect(d.Title).ToNot(BeEmpty())
+				Expect(d.Text).ToNot(BeEmpty())
+				Expect(d.AuthorName).ToNot(BeEmpty())
+				Expect(d.AuthorEmail).ToNot(BeEmpty())
+				return mergeUrl, nil
+			}
+			SetupPaCWebhookFunc = func(string, string, string) error {
+				defer GinkgoRecover()
+				Fail("Should not create webhook if GitHub application is used")
+				return nil
+			}
+
+			annotationValue := fmt.Sprintf("{\"name\":\"%s\",\"git-url\":\"%s\",\"git-revision\":\"%s\",\"git-path\":\"%s\"}", nonConfigMapGitPipelineName, gitPipelineURL, gitPipelineRevision, nonConfigMapGitPipelinePath)
+			annotations := map[string]string{defaultBuildPipelineAnnotation: annotationValue}
+			createCustomComponentWithBuildRequest(componentConfig{
+				componentKey: resourcePacPrepKey,
+				annotations:  annotations,
+			}, BuildRequestConfigurePaCAnnotationValue)
+
+			pacRepo := waitPaCRepositoryCreated(resourcePacPrepKey)
+			Expect(pacRepo.Spec.Params).ShouldNot(BeNil())
+			existingParams := map[string]string{}
+			for _, param := range *pacRepo.Spec.Params {
+				existingParams[param.Name] = param.Value
+			}
+			val, ok := existingParams[pacCustomParamAppstudioWorkspace]
+			Expect(ok).Should(BeTrue())
+			Expect(val).Should(Equal("build"))
+
+			waitPaCFinalizerOnComponent(resourcePacPrepKey)
+			Eventually(func() bool {
+				return isCreatePaCPullRequestInvoked
+			}, timeout, interval).Should(BeTrue())
+
+			expectPacBuildStatus(resourcePacPrepKey, "enabled", 0, "", mergeUrl)
+		})
+
+		It("should successfully submit PR with PaC definitions using GitHub application, overriding bundle pipeline with git pipline of the same name in configMap", func() {
+			mergeUrl := "merge-url"
+
+			isCreatePaCPullRequestInvoked := false
+			EnsurePaCMergeRequestFunc = func(repoUrl string, d *gp.MergeRequestData) (string, error) {
+				isCreatePaCPullRequestInvoked = true
+				Expect(repoUrl).To(Equal(SampleRepoLink + "-" + resourcePacPrepKey.Name))
+				Expect(len(d.Files)).To(Equal(2))
+				for _, file := range d.Files {
+					Expect(strings.HasPrefix(file.FullPath, ".tekton/")).To(BeTrue())
+				}
+				Expect(d.CommitMessage).ToNot(BeEmpty())
+				Expect(d.BranchName).ToNot(BeEmpty())
+				Expect(d.BaseBranchName).To(Equal("main"))
+				Expect(d.Title).ToNot(BeEmpty())
+				Expect(d.Text).ToNot(BeEmpty())
+				Expect(d.AuthorName).ToNot(BeEmpty())
+				Expect(d.AuthorEmail).ToNot(BeEmpty())
+				return mergeUrl, nil
+			}
+			SetupPaCWebhookFunc = func(string, string, string) error {
+				defer GinkgoRecover()
+				Fail("Should not create webhook if GitHub application is used")
+				return nil
+			}
+
+			annotationValue := fmt.Sprintf("{\"name\":\"%s\",\"git-url\":\"%s\",\"git-revision\":\"%s\",\"git-path\":\"%s\"}", defaultPipelineName, gitPipelineURL, gitPipelineRevision, bundlePipelineGitPathOverride)
+			annotations := map[string]string{defaultBuildPipelineAnnotation: annotationValue}
+			createCustomComponentWithBuildRequest(componentConfig{
+				componentKey: resourcePacPrepKey,
+				annotations:  annotations,
+			}, BuildRequestConfigurePaCAnnotationValue)
+
+			pacRepo := waitPaCRepositoryCreated(resourcePacPrepKey)
+			Expect(pacRepo.Spec.Params).ShouldNot(BeNil())
+			existingParams := map[string]string{}
+			for _, param := range *pacRepo.Spec.Params {
+				existingParams[param.Name] = param.Value
+			}
+			val, ok := existingParams[pacCustomParamAppstudioWorkspace]
+			Expect(ok).Should(BeTrue())
+			Expect(val).Should(Equal("build"))
+
+			waitPaCFinalizerOnComponent(resourcePacPrepKey)
+			Eventually(func() bool {
+				return isCreatePaCPullRequestInvoked
+			}, timeout, interval).Should(BeTrue())
+
+			expectPacBuildStatus(resourcePacPrepKey, "enabled", 0, "", mergeUrl)
+		})
+
 		It("should fail to submit PR if build pipeline annotation isn't valid json", func() {
 			annotations := map[string]string{defaultBuildPipelineAnnotation: "wrong"}
 			createCustomComponentWithBuildRequest(componentConfig{
