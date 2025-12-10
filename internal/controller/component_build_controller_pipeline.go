@@ -251,7 +251,7 @@ func (r *ComponentBuildReconciler) GetBuildPipelineFromComponentAnnotation(ctx c
 
 	if resolverType == "" {
 		err = fmt.Errorf("cannot determine resolver for pipeline: name=%s", buildPipeline.Name)
-		return nil, nil, "", boerrors.NewBuildOpError(boerrors.EWrongPipelineAnnotation, err)
+		return nil, nil, "", boerrors.NewBuildOpError(boerrors.EBuildPipelineInvalid, err)
 	}
 
 	switch resolverType {

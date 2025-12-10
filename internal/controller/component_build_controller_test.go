@@ -985,6 +985,23 @@ var _ = Describe("Component build controller", func() {
 			expectPacBuildStatus(resourcePacPrepKey, "enabled", 0, "", mergeUrl)
 		})
 
+		It("should fail to submit PR if build pipeline annotation combines multiple resolvers", func() {
+			annotationValue := fmt.Sprintf("{\"name\":\"%s\",\"bundle\":\"%s\",\"git-url\":\"%s\",\"git-revision\":\"%s\",\"git-path\":\"%s\"}", defaultPipelineName, "latest", gitPipelineURL, gitPipelineRevision, bundlePipelineGitPathOverride)
+			annotations := map[string]string{defaultBuildPipelineAnnotation: annotationValue}
+			createCustomComponentWithBuildRequest(componentConfig{
+				componentKey: resourcePacPrepKey,
+				annotations:  annotations,
+			}, BuildRequestConfigurePaCAnnotationValue)
+			waitComponentAnnotationGone(resourcePacPrepKey, BuildRequestAnnotationName)
+
+			expectError := boerrors.NewBuildOpError(boerrors.EWrongPipelineAnnotation, nil)
+
+			buildStatus := readBuildStatus(getComponent(resourcePacPrepKey))
+			Expect(buildStatus).ToNot(BeNil())
+			errorMessage := fmt.Sprintf("%d: %s", expectError.GetErrorId(), expectError.ShortError())
+			Expect(buildStatus.Message).To(ContainSubstring(errorMessage))
+		})
+
 		It("should fail to submit PR if build pipeline annotation isn't valid json", func() {
 			annotations := map[string]string{defaultBuildPipelineAnnotation: "wrong"}
 			createCustomComponentWithBuildRequest(componentConfig{
@@ -1001,8 +1018,25 @@ var _ = Describe("Component build controller", func() {
 			Expect(buildStatus.Message).To(ContainSubstring(errorMessage))
 		})
 
-		It("should fail to submit PR if build pipeline annotation has non existing pipeline", func() {
+		It("should fail to submit PR if build pipeline annotation has non existing bundle pipeline", func() {
 			annotationValue := fmt.Sprintf("{\"name\":\"%s\",\"bundle\":\"%s\"}", "wrong-pipeline", "latest")
+			annotations := map[string]string{defaultBuildPipelineAnnotation: annotationValue}
+			createCustomComponentWithBuildRequest(componentConfig{
+				componentKey: resourcePacPrepKey,
+				annotations:  annotations,
+			}, BuildRequestConfigurePaCAnnotationValue)
+			waitComponentAnnotationGone(resourcePacPrepKey, BuildRequestAnnotationName)
+
+			expectError := boerrors.NewBuildOpError(boerrors.EBuildPipelineInvalid, nil)
+
+			buildStatus := readBuildStatus(getComponent(resourcePacPrepKey))
+			Expect(buildStatus).ToNot(BeNil())
+			errorMessage := fmt.Sprintf("%d: %s", expectError.GetErrorId(), expectError.ShortError())
+			Expect(buildStatus.Message).To(ContainSubstring(errorMessage))
+		})
+
+		It("should fail to submit PR if build pipeline annotation has non existing pipeline", func() {
+			annotationValue := fmt.Sprintf("{\"name\":\"%s\"}", "wrong-pipeline")
 			annotations := map[string]string{defaultBuildPipelineAnnotation: annotationValue}
 			createCustomComponentWithBuildRequest(componentConfig{
 				componentKey: resourcePacPrepKey,
